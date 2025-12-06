@@ -17,7 +17,7 @@ AI-powered music generation app with Solana token gating. Create unique tracks u
 - **AI**: Replicate API (MusicGen model)
 - **Audio**: Wavesurfer.js for waveform visualization
 - **Web3**: @solana/wallet-adapter-react, @solana/web3.js, @solana/spl-token
-- **Database**: Upstash Redis (for IP tracking)
+- **Database**: Redis via ioredis (Railway Redis for IP tracking)
 
 ## Access Control
 
@@ -31,7 +31,7 @@ AI-powered music generation app with Solana token gating. Create unique tracks u
 - Node.js 18+
 - npm or yarn
 - Replicate API key
-- Upstash Redis account
+- Railway Redis (or any Redis instance)
 - Solana wallet for testing
 
 ### Installation
@@ -54,8 +54,7 @@ cp .env.example .env.local
 
 4. Configure environment variables in `.env.local`:
    - `REPLICATE_API_TOKEN`: Get from [Replicate](https://replicate.com)
-   - `UPSTASH_REDIS_REST_URL`: Get from [Upstash](https://upstash.com)
-   - `UPSTASH_REDIS_REST_TOKEN`: Get from Upstash
+   - `REDIS_URL`: Your Redis connection URL (e.g., from [Railway](https://railway.app))
    - `NEXT_PUBLIC_LV_TOKEN_MINT`: Your SPL token mint address
 
 5. Run the development server:
@@ -70,8 +69,7 @@ npm run dev
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `REPLICATE_API_TOKEN` | Replicate API key for MusicGen | Yes |
-| `UPSTASH_REDIS_REST_URL` | Upstash Redis REST URL | Yes |
-| `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis REST token | Yes |
+| `REDIS_URL` | Redis connection URL (e.g., `redis://default:pass@host:6379`) | Yes |
 | `SOLANA_RPC_URL` | Solana RPC endpoint | Yes |
 | `NEXT_PUBLIC_LV_TOKEN_MINT` | $LV token mint address | Yes |
 | `NEXT_PUBLIC_SOLANA_RPC_URL` | Public Solana RPC | Yes |
@@ -94,7 +92,7 @@ app/
 │   └── WaveformVisualizer.tsx # Audio waveform display
 ├── lib/
 │   ├── constants.ts         # App constants and prompts
-│   ├── redis.ts             # Upstash Redis client
+│   ├── redis.ts             # Redis client (ioredis)
 │   └── solana.ts            # Solana token checking
 ├── providers/
 │   └── WalletProvider.tsx   # Solana wallet adapter setup
