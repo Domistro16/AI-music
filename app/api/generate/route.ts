@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Replicate from 'replicate';
 import { getTrialStatus, incrementTrialUsage } from '@/app/lib/redis';
 import { checkTokenBalance } from '@/app/lib/solana';
 
-// MusicGen model on Replicate
-const MUSICGEN_MODEL = 'meta/musicgen:671ac645ce5e552cc63a54a2bbff63fcf798043055f2c4f4e09e84b8ac7e166d';
+const SUNO_API_BASE = 'https://api.sunoapi.org';
 
 interface GenerateRequest {
   prompt: string;
@@ -12,36 +10,146 @@ interface GenerateRequest {
   walletAddress?: string;
 }
 
+interface SunoGenerateResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+  };
+}
+
+interface SunoStatusResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    status: 'SUCCESS' | 'IN_PROGRESS' | 'FAILED' | 'PENDING';
+    response?: {
+      sunoData: Array<{
+        id: string;
+        audioUrl: string;
+        streamAudioUrl?: string;
+        imageUrl?: string;
+        title?: string;
+        tags?: string;
+        duration?: number;
+      }>;
+    };
+    errorMessage?: string;
+  };
+}
+
 function getClientIP(request: NextRequest): string {
-  // Check various headers for the client IP
   const forwardedFor = request.headers.get('x-forwarded-for');
   if (forwardedFor) {
     return forwardedFor.split(',')[0].trim();
   }
-
   const realIP = request.headers.get('x-real-ip');
   if (realIP) {
     return realIP;
   }
-
-  // Fallback
   return '127.0.0.1';
+}
+
+// Helper to wait
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Generate music using Suno API
+async function generateMusicWithSuno(prompt: string): Promise<string> {
+  const apiKey = process.env.SUNO_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('SUNO_API_KEY is not configured');
+  }
+
+  // Step 1: Start generation
+  console.log('[Suno] Starting music generation...');
+
+  const generateResponse = await fetch(`${SUNO_API_BASE}/api/v1/generate`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      prompt: prompt,
+      customMode: false,
+      instrumental: false,
+      model: 'V4_5',
+    }),
+  });
+
+  if (!generateResponse.ok) {
+    const errorText = await generateResponse.text();
+    console.error('[Suno] Generate request failed:', generateResponse.status, errorText);
+    throw new Error(`Suno API error: ${generateResponse.status} - ${errorText}`);
+  }
+
+  const generateData: SunoGenerateResponse = await generateResponse.json();
+
+  if (generateData.code !== 200 || !generateData.data?.taskId) {
+    throw new Error(`Suno API error: ${generateData.msg || 'Unknown error'}`);
+  }
+
+  const taskId = generateData.data.taskId;
+  console.log('[Suno] Task created:', taskId);
+
+  // Step 2: Poll for completion
+  const maxAttempts = 60; // 60 * 3s = 3 minutes max
+  const pollInterval = 3000; // 3 seconds
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await sleep(pollInterval);
+
+    console.log(`[Suno] Polling status (attempt ${attempt + 1}/${maxAttempts})...`);
+
+    const statusResponse = await fetch(
+      `${SUNO_API_BASE}/api/v1/generate/record-info?taskId=${taskId}`,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+        },
+      }
+    );
+
+    if (!statusResponse.ok) {
+      console.error('[Suno] Status check failed:', statusResponse.status);
+      continue;
+    }
+
+    const statusData: SunoStatusResponse = await statusResponse.json();
+
+    console.log('[Suno] Status:', statusData.data?.status);
+
+    if (statusData.data?.status === 'SUCCESS') {
+      const sunoData = statusData.data.response?.sunoData;
+
+      if (sunoData && sunoData.length > 0 && sunoData[0].audioUrl) {
+        console.log('[Suno] Generation complete!');
+        return sunoData[0].audioUrl;
+      }
+    } else if (statusData.data?.status === 'FAILED') {
+      throw new Error(`Suno generation failed: ${statusData.data.errorMessage || 'Unknown error'}`);
+    }
+    // Continue polling for IN_PROGRESS or PENDING
+  }
+
+  throw new Error('Suno generation timed out after 3 minutes');
 }
 
 export async function POST(request: NextRequest) {
   try {
-    // Check for Replicate API token
-    if (!process.env.REPLICATE_API_TOKEN) {
-      console.error('REPLICATE_API_TOKEN is not configured');
+    // Check for Suno API key
+    if (!process.env.SUNO_API_KEY) {
+      console.error('SUNO_API_KEY is not configured');
       return NextResponse.json(
-        { error: 'Server configuration error: Replicate API not configured' },
+        { error: 'Server configuration error: Suno API not configured' },
         { status: 500 }
       );
     }
-
-    const replicate = new Replicate({
-      auth: process.env.REPLICATE_API_TOKEN,
-    });
 
     const body: GenerateRequest = await request.json();
     const { prompt, duration, walletAddress } = body;
@@ -54,21 +162,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!duration || ![5, 10, 15, 30].includes(duration)) {
-      return NextResponse.json(
-        { error: 'Invalid duration. Must be 5, 10, 15, or 30 seconds' },
-        { status: 400 }
-      );
-    }
+    // Duration is informational for Suno (it generates full songs ~2-3 min)
+    // We'll accept the parameter but Suno controls actual length
 
     // Get client IP
     const clientIP = getClientIP(request);
 
-    // Check if wallet is provided
+    // Check access
     if (walletAddress) {
-      // Verify token balance
       const balanceResult = await checkTokenBalance(walletAddress);
-
       if (!balanceResult.hasAccess) {
         return NextResponse.json(
           {
@@ -80,12 +182,8 @@ export async function POST(request: NextRequest) {
           { status: 403 }
         );
       }
-
-      // Wallet verified with sufficient balance - proceed with generation
     } else {
-      // No wallet - check trial status
       const trialStatus = await getTrialStatus(clientIP);
-
       if (!trialStatus.hasTrialsLeft) {
         return NextResponse.json(
           {
@@ -97,36 +195,15 @@ export async function POST(request: NextRequest) {
           { status: 403 }
         );
       }
-
-      // Increment trial usage before generation
       await incrementTrialUsage(clientIP);
     }
 
-    // Generate music using Replicate
-    console.log('Starting music generation with prompt:', prompt.substring(0, 50) + '...');
+    // Generate music using Suno
+    console.log('[Suno] Starting music generation with prompt:', prompt.substring(0, 50) + '...');
 
-    const output = await replicate.run(MUSICGEN_MODEL, {
-      input: {
-        prompt: prompt.trim(),
-        duration: duration,
-        model_version: 'stereo-melody-large',
-        output_format: 'mp3',
-        normalization_strategy: 'peak',
-      },
-    });
+    const audioUrl = await generateMusicWithSuno(prompt.trim());
 
-    console.log('Replicate output:', typeof output, output);
-
-    // Get the audio URL from the output
-    const audioUrl = typeof output === 'string' ? output : (output as unknown as string);
-
-    if (!audioUrl) {
-      console.error('No audio URL returned from Replicate');
-      return NextResponse.json(
-        { error: 'Failed to generate music: No audio URL returned' },
-        { status: 500 }
-      );
-    }
+    console.log('[Suno] Generation complete, audio URL:', audioUrl.substring(0, 50) + '...');
 
     // Get updated trial status
     const updatedTrialStatus = walletAddress ? null : await getTrialStatus(clientIP);
@@ -144,10 +221,9 @@ export async function POST(request: NextRequest) {
 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    // Check for specific error types
-    if (errorMessage.includes('Invalid token') || errorMessage.includes('Unauthorized')) {
+    if (errorMessage.includes('API') || errorMessage.includes('Unauthorized') || errorMessage.includes('401')) {
       return NextResponse.json(
-        { error: 'Invalid Replicate API token', details: errorMessage },
+        { error: 'Invalid Suno API key', details: errorMessage },
         { status: 401 }
       );
     }
@@ -166,6 +242,6 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     ...trialStatus,
-    ip: clientIP.substring(0, 8) + '...', // Partial IP for debugging
+    ip: clientIP.substring(0, 8) + '...',
   });
 }
