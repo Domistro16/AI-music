@@ -25,15 +25,12 @@ function getRedisClient(): Redis | null {
 
     redis = new Redis(redisUrl, {
       maxRetriesPerRequest: 3,
-      retryDelayOnFailover: 100,
-      retryDelayOnClusterDown: 100,
       connectTimeout: 10000,
-      commandTimeout: 5000,
-      // Enable TLS for Railway (they use rediss:// or require TLS)
+      // Enable TLS for Railway
       tls: useTls ? { rejectUnauthorized: false } : undefined,
       // Disable offline queue to fail fast in serverless
       enableOfflineQueue: false,
-      // Reconnect strategy for serverless
+      // Lazy connect for serverless
       lazyConnect: true,
     });
 
@@ -68,7 +65,6 @@ export async function getTrialStatus(ip: string): Promise<TrialStatus> {
 
   try {
     if (!client) {
-      // If Redis not configured, allow access (fail open for development)
       console.log('[Redis] No client, allowing access');
       return {
         remaining: FREE_TRIAL_LIMIT,
@@ -95,7 +91,6 @@ export async function getTrialStatus(ip: string): Promise<TrialStatus> {
     };
   } catch (error) {
     console.error('[Redis] Error getting trial status:', error);
-    // If Redis fails, allow access (fail open for better UX)
     return {
       remaining: FREE_TRIAL_LIMIT,
       used: 0,
@@ -114,7 +109,6 @@ export async function incrementTrialUsage(ip: string): Promise<TrialStatus> {
 
   try {
     if (!client) {
-      // If no Redis, still allow but don't track
       return {
         remaining: FREE_TRIAL_LIMIT - 1,
         used: 1,
@@ -123,14 +117,12 @@ export async function incrementTrialUsage(ip: string): Promise<TrialStatus> {
       };
     }
 
-    // Ensure connection is established
     if (client.status !== 'ready') {
       await client.connect();
     }
 
     const newCount = await client.incr(key);
 
-    // Set expiration to 30 days if this is the first increment
     if (newCount === 1) {
       await client.expire(key, 60 * 60 * 24 * 30); // 30 days
     }
@@ -145,7 +137,6 @@ export async function incrementTrialUsage(ip: string): Promise<TrialStatus> {
     };
   } catch (error) {
     console.error('[Redis] Error incrementing trial:', error);
-    // On error, allow access but indicate usage
     return {
       remaining: FREE_TRIAL_LIMIT - 1,
       used: 1,

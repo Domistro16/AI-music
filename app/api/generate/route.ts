@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import Replicate from 'replicate';
+import { GoogleGenAI } from '@google/genai';
 import { getTrialStatus, incrementTrialUsage } from '@/app/lib/redis';
 import { checkTokenBalance } from '@/app/lib/solana';
-
-// MusicGen model on Replicate
-const MUSICGEN_MODEL = 'meta/musicgen:671ac645ce5e552cc63a54a2bbff63fcf798043055f2c4f4e09e84b8ac7e166d';
 
 interface GenerateRequest {
   prompt: string;
@@ -13,35 +10,138 @@ interface GenerateRequest {
 }
 
 function getClientIP(request: NextRequest): string {
-  // Check various headers for the client IP
   const forwardedFor = request.headers.get('x-forwarded-for');
   if (forwardedFor) {
     return forwardedFor.split(',')[0].trim();
   }
-
   const realIP = request.headers.get('x-real-ip');
   if (realIP) {
     return realIP;
   }
-
-  // Fallback
   return '127.0.0.1';
+}
+
+// Generate music using Lyria RealTime
+async function generateMusicWithLyria(prompt: string, durationSeconds: number): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is not configured');
+  }
+
+  const client = new GoogleGenAI({
+    apiKey,
+    httpOptions: { apiVersion: 'v1alpha' }
+  });
+
+  return new Promise((resolve, reject) => {
+    const audioChunks: Buffer[] = [];
+    let totalDuration = 0;
+    const targetDuration = durationSeconds * 1000; // Convert to ms
+    let resolved = false;
+
+    // Timeout after duration + buffer time
+    const timeout = setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+
+      if (audioChunks.length > 0) {
+        const audioBuffer = Buffer.concat(audioChunks);
+        const base64Audio = audioBuffer.toString('base64');
+        resolve(`data:audio/wav;base64,${base64Audio}`);
+      } else {
+        reject(new Error('No audio generated within timeout'));
+      }
+    }, targetDuration + 15000); // Add 15 second buffer
+
+    client.live.music.connect({
+      model: 'models/lyria-realtime-exp',
+      callbacks: {
+        onmessage: (message) => {
+          if (resolved) return;
+
+          // Handle audio chunks
+          const audioData = message?.serverContent?.audioChunks;
+          if (audioData && Array.isArray(audioData)) {
+            for (const chunk of audioData) {
+              if (chunk.data) {
+                const buffer = Buffer.from(chunk.data, 'base64');
+                audioChunks.push(buffer);
+                // Estimate duration: 48kHz, stereo, 16-bit = 192000 bytes/sec
+                totalDuration += (buffer.length / 192000) * 1000;
+
+                if (totalDuration >= targetDuration) {
+                  resolved = true;
+                  clearTimeout(timeout);
+                  const audioBuffer = Buffer.concat(audioChunks);
+                  const base64Audio = audioBuffer.toString('base64');
+                  resolve(`data:audio/wav;base64,${base64Audio}`);
+                  return;
+                }
+              }
+            }
+          }
+        },
+        onerror: (error) => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timeout);
+          console.error('[Lyria] Error:', error);
+          reject(new Error(`Lyria error: ${error?.message || 'Unknown error'}`));
+        },
+        onclose: () => {
+          console.log('[Lyria] Connection closed');
+          if (!resolved && audioChunks.length > 0) {
+            resolved = true;
+            clearTimeout(timeout);
+            const audioBuffer = Buffer.concat(audioChunks);
+            const base64Audio = audioBuffer.toString('base64');
+            resolve(`data:audio/wav;base64,${base64Audio}`);
+          }
+        }
+      }
+    }).then(async (session) => {
+      console.log('[Lyria] Connection opened');
+
+      // Configure music generation
+      await session.setMusicGenerationConfig({
+        musicGenerationConfig: {
+          bpm: 120,
+          density: 0.5,
+          brightness: 0.5,
+          guidance: 3.5,
+        }
+      });
+
+      // Set the prompt
+      await session.setWeightedPrompts({
+        weightedPrompts: [
+          { text: prompt, weight: 1.0 }
+        ]
+      });
+
+      // Start playing
+      await session.play();
+
+    }).catch((err) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+      reject(err);
+    });
+  });
 }
 
 export async function POST(request: NextRequest) {
   try {
-    // Check for Replicate API token
-    if (!process.env.REPLICATE_API_TOKEN) {
-      console.error('REPLICATE_API_TOKEN is not configured');
+    // Check for Gemini API key
+    if (!process.env.GEMINI_API_KEY) {
+      console.error('GEMINI_API_KEY is not configured');
       return NextResponse.json(
-        { error: 'Server configuration error: Replicate API not configured' },
+        { error: 'Server configuration error: Gemini API not configured' },
         { status: 500 }
       );
     }
-
-    const replicate = new Replicate({
-      auth: process.env.REPLICATE_API_TOKEN,
-    });
 
     const body: GenerateRequest = await request.json();
     const { prompt, duration, walletAddress } = body;
@@ -64,11 +164,9 @@ export async function POST(request: NextRequest) {
     // Get client IP
     const clientIP = getClientIP(request);
 
-    // Check if wallet is provided
+    // Check access
     if (walletAddress) {
-      // Verify token balance
       const balanceResult = await checkTokenBalance(walletAddress);
-
       if (!balanceResult.hasAccess) {
         return NextResponse.json(
           {
@@ -80,12 +178,8 @@ export async function POST(request: NextRequest) {
           { status: 403 }
         );
       }
-
-      // Wallet verified with sufficient balance - proceed with generation
     } else {
-      // No wallet - check trial status
       const trialStatus = await getTrialStatus(clientIP);
-
       if (!trialStatus.hasTrialsLeft) {
         return NextResponse.json(
           {
@@ -97,36 +191,15 @@ export async function POST(request: NextRequest) {
           { status: 403 }
         );
       }
-
-      // Increment trial usage before generation
       await incrementTrialUsage(clientIP);
     }
 
-    // Generate music using Replicate
-    console.log('Starting music generation with prompt:', prompt.substring(0, 50) + '...');
+    // Generate music using Lyria
+    console.log('[Lyria] Starting music generation with prompt:', prompt.substring(0, 50) + '...');
 
-    const output = await replicate.run(MUSICGEN_MODEL, {
-      input: {
-        prompt: prompt.trim(),
-        duration: duration,
-        model_version: 'stereo-melody-large',
-        output_format: 'mp3',
-        normalization_strategy: 'peak',
-      },
-    });
+    const audioUrl = await generateMusicWithLyria(prompt.trim(), duration);
 
-    console.log('Replicate output:', typeof output, output);
-
-    // Get the audio URL from the output
-    const audioUrl = typeof output === 'string' ? output : (output as unknown as string);
-
-    if (!audioUrl) {
-      console.error('No audio URL returned from Replicate');
-      return NextResponse.json(
-        { error: 'Failed to generate music: No audio URL returned' },
-        { status: 500 }
-      );
-    }
+    console.log('[Lyria] Generation complete, audio length:', audioUrl.length);
 
     // Get updated trial status
     const updatedTrialStatus = walletAddress ? null : await getTrialStatus(clientIP);
@@ -144,10 +217,9 @@ export async function POST(request: NextRequest) {
 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    // Check for specific error types
-    if (errorMessage.includes('Invalid token') || errorMessage.includes('Unauthorized')) {
+    if (errorMessage.includes('API key') || errorMessage.includes('Unauthorized')) {
       return NextResponse.json(
-        { error: 'Invalid Replicate API token', details: errorMessage },
+        { error: 'Invalid Gemini API key', details: errorMessage },
         { status: 401 }
       );
     }
@@ -166,6 +238,6 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     ...trialStatus,
-    ip: clientIP.substring(0, 8) + '...', // Partial IP for debugging
+    ip: clientIP.substring(0, 8) + '...',
   });
 }
