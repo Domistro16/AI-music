@@ -3,10 +3,6 @@ import Replicate from 'replicate';
 import { getTrialStatus, incrementTrialUsage } from '@/app/lib/redis';
 import { checkTokenBalance } from '@/app/lib/solana';
 
-const replicate = new Replicate({
-  auth: process.env.REPLICATE_API_TOKEN,
-});
-
 // MusicGen model on Replicate
 const MUSICGEN_MODEL = 'meta/musicgen:671ac645ce5e552cc63a54a2bbff63fcf798043055f2c4f4e09e84b8ac7e166d';
 
@@ -34,6 +30,19 @@ function getClientIP(request: NextRequest): string {
 
 export async function POST(request: NextRequest) {
   try {
+    // Check for Replicate API token
+    if (!process.env.REPLICATE_API_TOKEN) {
+      console.error('REPLICATE_API_TOKEN is not configured');
+      return NextResponse.json(
+        { error: 'Server configuration error: Replicate API not configured' },
+        { status: 500 }
+      );
+    }
+
+    const replicate = new Replicate({
+      auth: process.env.REPLICATE_API_TOKEN,
+    });
+
     const body: GenerateRequest = await request.json();
     const { prompt, duration, walletAddress } = body;
 
@@ -94,6 +103,8 @@ export async function POST(request: NextRequest) {
     }
 
     // Generate music using Replicate
+    console.log('Starting music generation with prompt:', prompt.substring(0, 50) + '...');
+
     const output = await replicate.run(MUSICGEN_MODEL, {
       input: {
         prompt: prompt.trim(),
@@ -104,8 +115,18 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    console.log('Replicate output:', typeof output, output);
+
     // Get the audio URL from the output
     const audioUrl = typeof output === 'string' ? output : (output as unknown as string);
+
+    if (!audioUrl) {
+      console.error('No audio URL returned from Replicate');
+      return NextResponse.json(
+        { error: 'Failed to generate music: No audio URL returned' },
+        { status: 500 }
+      );
+    }
 
     // Get updated trial status
     const updatedTrialStatus = walletAddress ? null : await getTrialStatus(clientIP);
@@ -122,6 +143,14 @@ export async function POST(request: NextRequest) {
     console.error('Generation error:', error);
 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    // Check for specific error types
+    if (errorMessage.includes('Invalid token') || errorMessage.includes('Unauthorized')) {
+      return NextResponse.json(
+        { error: 'Invalid Replicate API token', details: errorMessage },
+        { status: 401 }
+      );
+    }
 
     return NextResponse.json(
       { error: 'Failed to generate music', details: errorMessage },
