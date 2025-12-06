@@ -5,6 +5,8 @@ const KEY_PREFIX = 'music_gen:ip:';
 const TASK_PREFIX = 'music_gen:task:';
 const TRACK_PREFIX = 'music_gen:track:';
 const TRACKS_LIST_KEY = 'music_gen:tracks_list';
+const TRACKS_BY_PLAYS_KEY = 'music_gen:tracks_by_plays';
+const TRACKS_BY_DOWNLOADS_KEY = 'music_gen:tracks_by_downloads';
 
 // Lazy initialization for serverless environments
 let redis: Redis | null = null;
@@ -277,12 +279,14 @@ export interface StoredTrack {
   instrumental?: boolean;
   duration?: number;
   createdAt: string;
+  plays: number;
+  downloads: number;
 }
 
 /**
  * Save a completed track to the public library
  */
-export async function saveTrack(track: StoredTrack): Promise<void> {
+export async function saveTrack(track: Omit<StoredTrack, 'plays' | 'downloads'>): Promise<void> {
   const client = getRedisClient();
   if (!client) return;
 
@@ -290,12 +294,21 @@ export async function saveTrack(track: StoredTrack): Promise<void> {
     await ensureConnection(client);
     const key = `${TRACK_PREFIX}${track.id}`;
 
-    // Store the track data
-    await client.set(key, JSON.stringify(track));
+    // Initialize with 0 plays and downloads
+    const fullTrack: StoredTrack = {
+      ...track,
+      plays: 0,
+      downloads: 0,
+    };
 
-    // Add to the sorted set (sorted by timestamp for ordering)
+    // Store the track data
+    await client.set(key, JSON.stringify(fullTrack));
+
+    // Add to sorted sets
     const timestamp = new Date(track.createdAt).getTime();
     await client.zadd(TRACKS_LIST_KEY, timestamp, track.id);
+    await client.zadd(TRACKS_BY_PLAYS_KEY, 0, track.id);
+    await client.zadd(TRACKS_BY_DOWNLOADS_KEY, 0, track.id);
 
     console.log('[Redis] Track saved:', track.id);
   } catch (error) {
@@ -321,18 +334,37 @@ export async function getTrack(trackId: string): Promise<StoredTrack | null> {
   }
 }
 
+export type TrackSortBy = 'recent' | 'plays' | 'downloads';
+
 /**
- * Get all tracks (most recent first)
+ * Get all tracks with sorting options
  */
-export async function getTracks(limit = 50, offset = 0): Promise<StoredTrack[]> {
+export async function getTracks(
+  limit = 50,
+  offset = 0,
+  sortBy: TrackSortBy = 'recent'
+): Promise<StoredTrack[]> {
   const client = getRedisClient();
   if (!client) return [];
 
   try {
     await ensureConnection(client);
 
-    // Get track IDs from sorted set (newest first)
-    const trackIds = await client.zrevrange(TRACKS_LIST_KEY, offset, offset + limit - 1);
+    // Choose the sorted set based on sort option
+    let sortKey: string;
+    switch (sortBy) {
+      case 'plays':
+        sortKey = TRACKS_BY_PLAYS_KEY;
+        break;
+      case 'downloads':
+        sortKey = TRACKS_BY_DOWNLOADS_KEY;
+        break;
+      default:
+        sortKey = TRACKS_LIST_KEY;
+    }
+
+    // Get track IDs from sorted set (highest/newest first)
+    const trackIds = await client.zrevrange(sortKey, offset, offset + limit - 1);
 
     if (trackIds.length === 0) return [];
 
@@ -362,6 +394,66 @@ export async function getTrackCount(): Promise<number> {
   } catch (error) {
     console.error('[Redis] Error getting track count:', error);
     return 0;
+  }
+}
+
+/**
+ * Increment play count for a track
+ */
+export async function incrementPlayCount(trackId: string): Promise<StoredTrack | null> {
+  const client = getRedisClient();
+  if (!client) return null;
+
+  try {
+    await ensureConnection(client);
+    const key = `${TRACK_PREFIX}${trackId}`;
+    const data = await client.get(key);
+
+    if (!data) return null;
+
+    const track = JSON.parse(data) as StoredTrack;
+    track.plays = (track.plays || 0) + 1;
+
+    // Update track data
+    await client.set(key, JSON.stringify(track));
+
+    // Update sorted set score
+    await client.zadd(TRACKS_BY_PLAYS_KEY, track.plays, trackId);
+
+    return track;
+  } catch (error) {
+    console.error('[Redis] Error incrementing play count:', error);
+    return null;
+  }
+}
+
+/**
+ * Increment download count for a track
+ */
+export async function incrementDownloadCount(trackId: string): Promise<StoredTrack | null> {
+  const client = getRedisClient();
+  if (!client) return null;
+
+  try {
+    await ensureConnection(client);
+    const key = `${TRACK_PREFIX}${trackId}`;
+    const data = await client.get(key);
+
+    if (!data) return null;
+
+    const track = JSON.parse(data) as StoredTrack;
+    track.downloads = (track.downloads || 0) + 1;
+
+    // Update track data
+    await client.set(key, JSON.stringify(track));
+
+    // Update sorted set score
+    await client.zadd(TRACKS_BY_DOWNLOADS_KEY, track.downloads, trackId);
+
+    return track;
+  } catch (error) {
+    console.error('[Redis] Error incrementing download count:', error);
+    return null;
   }
 }
 
