@@ -1,12 +1,42 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenAI } from '@google/genai';
 import { getTrialStatus, incrementTrialUsage } from '@/app/lib/redis';
 import { checkTokenBalance } from '@/app/lib/solana';
+
+const SUNO_API_BASE = 'https://api.sunoapi.org';
 
 interface GenerateRequest {
   prompt: string;
   duration: number;
   walletAddress?: string;
+}
+
+interface SunoGenerateResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+  };
+}
+
+interface SunoStatusResponse {
+  code: number;
+  msg: string;
+  data: {
+    taskId: string;
+    status: 'SUCCESS' | 'IN_PROGRESS' | 'FAILED' | 'PENDING';
+    response?: {
+      sunoData: Array<{
+        id: string;
+        audioUrl: string;
+        streamAudioUrl?: string;
+        imageUrl?: string;
+        title?: string;
+        tags?: string;
+        duration?: number;
+      }>;
+    };
+    errorMessage?: string;
+  };
 }
 
 function getClientIP(request: NextRequest): string {
@@ -21,124 +51,102 @@ function getClientIP(request: NextRequest): string {
   return '127.0.0.1';
 }
 
-// Generate music using Lyria RealTime
-async function generateMusicWithLyria(prompt: string, durationSeconds: number): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
+// Helper to wait
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Generate music using Suno API
+async function generateMusicWithSuno(prompt: string): Promise<string> {
+  const apiKey = process.env.SUNO_API_KEY;
 
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not configured');
+    throw new Error('SUNO_API_KEY is not configured');
   }
 
-  const client = new GoogleGenAI({
-    apiKey,
-    httpOptions: { apiVersion: 'v1alpha' }
+  // Step 1: Start generation
+  console.log('[Suno] Starting music generation...');
+
+  const generateResponse = await fetch(`${SUNO_API_BASE}/api/v1/generate`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      prompt: prompt,
+      customMode: false,
+      instrumental: false,
+      model: 'V4_5',
+    }),
   });
 
-  return new Promise((resolve, reject) => {
-    const audioChunks: Buffer[] = [];
-    let totalDuration = 0;
-    const targetDuration = durationSeconds * 1000; // Convert to ms
-    let resolved = false;
+  if (!generateResponse.ok) {
+    const errorText = await generateResponse.text();
+    console.error('[Suno] Generate request failed:', generateResponse.status, errorText);
+    throw new Error(`Suno API error: ${generateResponse.status} - ${errorText}`);
+  }
 
-    // Timeout after duration + buffer time
-    const timeout = setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
+  const generateData: SunoGenerateResponse = await generateResponse.json();
 
-      if (audioChunks.length > 0) {
-        const audioBuffer = Buffer.concat(audioChunks);
-        const base64Audio = audioBuffer.toString('base64');
-        resolve(`data:audio/wav;base64,${base64Audio}`);
-      } else {
-        reject(new Error('No audio generated within timeout'));
-      }
-    }, targetDuration + 15000); // Add 15 second buffer
+  if (generateData.code !== 200 || !generateData.data?.taskId) {
+    throw new Error(`Suno API error: ${generateData.msg || 'Unknown error'}`);
+  }
 
-    client.live.music.connect({
-      model: 'models/lyria-realtime-exp',
-      callbacks: {
-        onmessage: (message) => {
-          if (resolved) return;
+  const taskId = generateData.data.taskId;
+  console.log('[Suno] Task created:', taskId);
 
-          // Handle audio chunks
-          const audioData = message?.serverContent?.audioChunks;
-          if (audioData && Array.isArray(audioData)) {
-            for (const chunk of audioData) {
-              if (chunk.data) {
-                const buffer = Buffer.from(chunk.data, 'base64');
-                audioChunks.push(buffer);
-                // Estimate duration: 48kHz, stereo, 16-bit = 192000 bytes/sec
-                totalDuration += (buffer.length / 192000) * 1000;
+  // Step 2: Poll for completion
+  const maxAttempts = 60; // 60 * 3s = 3 minutes max
+  const pollInterval = 3000; // 3 seconds
 
-                if (totalDuration >= targetDuration) {
-                  resolved = true;
-                  clearTimeout(timeout);
-                  const audioBuffer = Buffer.concat(audioChunks);
-                  const base64Audio = audioBuffer.toString('base64');
-                  resolve(`data:audio/wav;base64,${base64Audio}`);
-                  return;
-                }
-              }
-            }
-          }
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await sleep(pollInterval);
+
+    console.log(`[Suno] Polling status (attempt ${attempt + 1}/${maxAttempts})...`);
+
+    const statusResponse = await fetch(
+      `${SUNO_API_BASE}/api/v1/generate/record-info?taskId=${taskId}`,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
         },
-        onerror: (error) => {
-          if (resolved) return;
-          resolved = true;
-          clearTimeout(timeout);
-          console.error('[Lyria] Error:', error);
-          reject(new Error(`Lyria error: ${error?.message || 'Unknown error'}`));
-        },
-        onclose: () => {
-          console.log('[Lyria] Connection closed');
-          if (!resolved && audioChunks.length > 0) {
-            resolved = true;
-            clearTimeout(timeout);
-            const audioBuffer = Buffer.concat(audioChunks);
-            const base64Audio = audioBuffer.toString('base64');
-            resolve(`data:audio/wav;base64,${base64Audio}`);
-          }
-        }
       }
-    }).then(async (session) => {
-      console.log('[Lyria] Connection opened');
+    );
 
-      // Configure music generation
-      await session.setMusicGenerationConfig({
-        musicGenerationConfig: {
-          bpm: 120,
-          density: 0.5,
-          brightness: 0.5,
-          guidance: 3.5,
-        }
-      });
+    if (!statusResponse.ok) {
+      console.error('[Suno] Status check failed:', statusResponse.status);
+      continue;
+    }
 
-      // Set the prompt
-      await session.setWeightedPrompts({
-        weightedPrompts: [
-          { text: prompt, weight: 1.0 }
-        ]
-      });
+    const statusData: SunoStatusResponse = await statusResponse.json();
 
-      // Start playing
-      await session.play();
+    console.log('[Suno] Status:', statusData.data?.status);
 
-    }).catch((err) => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timeout);
-      reject(err);
-    });
-  });
+    if (statusData.data?.status === 'SUCCESS') {
+      const sunoData = statusData.data.response?.sunoData;
+
+      if (sunoData && sunoData.length > 0 && sunoData[0].audioUrl) {
+        console.log('[Suno] Generation complete!');
+        return sunoData[0].audioUrl;
+      }
+    } else if (statusData.data?.status === 'FAILED') {
+      throw new Error(`Suno generation failed: ${statusData.data.errorMessage || 'Unknown error'}`);
+    }
+    // Continue polling for IN_PROGRESS or PENDING
+  }
+
+  throw new Error('Suno generation timed out after 3 minutes');
 }
 
 export async function POST(request: NextRequest) {
   try {
-    // Check for Gemini API key
-    if (!process.env.GEMINI_API_KEY) {
-      console.error('GEMINI_API_KEY is not configured');
+    // Check for Suno API key
+    if (!process.env.SUNO_API_KEY) {
+      console.error('SUNO_API_KEY is not configured');
       return NextResponse.json(
-        { error: 'Server configuration error: Gemini API not configured' },
+        { error: 'Server configuration error: Suno API not configured' },
         { status: 500 }
       );
     }
@@ -154,12 +162,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!duration || ![5, 10, 15, 30].includes(duration)) {
-      return NextResponse.json(
-        { error: 'Invalid duration. Must be 5, 10, 15, or 30 seconds' },
-        { status: 400 }
-      );
-    }
+    // Duration is informational for Suno (it generates full songs ~2-3 min)
+    // We'll accept the parameter but Suno controls actual length
 
     // Get client IP
     const clientIP = getClientIP(request);
@@ -194,12 +198,12 @@ export async function POST(request: NextRequest) {
       await incrementTrialUsage(clientIP);
     }
 
-    // Generate music using Lyria
-    console.log('[Lyria] Starting music generation with prompt:', prompt.substring(0, 50) + '...');
+    // Generate music using Suno
+    console.log('[Suno] Starting music generation with prompt:', prompt.substring(0, 50) + '...');
 
-    const audioUrl = await generateMusicWithLyria(prompt.trim(), duration);
+    const audioUrl = await generateMusicWithSuno(prompt.trim());
 
-    console.log('[Lyria] Generation complete, audio length:', audioUrl.length);
+    console.log('[Suno] Generation complete, audio URL:', audioUrl.substring(0, 50) + '...');
 
     // Get updated trial status
     const updatedTrialStatus = walletAddress ? null : await getTrialStatus(clientIP);
@@ -217,9 +221,9 @@ export async function POST(request: NextRequest) {
 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-    if (errorMessage.includes('API key') || errorMessage.includes('Unauthorized')) {
+    if (errorMessage.includes('API') || errorMessage.includes('Unauthorized') || errorMessage.includes('401')) {
       return NextResponse.json(
-        { error: 'Invalid Gemini API key', details: errorMessage },
+        { error: 'Invalid Suno API key', details: errorMessage },
         { status: 401 }
       );
     }
