@@ -9,6 +9,9 @@ export interface Track {
   prompt: string;
   duration: number;
   generatedAt: string;
+  title?: string;
+  style?: string;
+  instrumental?: boolean;
 }
 
 interface TrackHistoryProps {
@@ -104,10 +107,22 @@ export const TrackHistory: FC<TrackHistoryProps> = ({
 
                 {/* Track info */}
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-white truncate">{track.prompt}</p>
+                  <p className="text-sm text-white truncate">
+                    {track.title || track.prompt}
+                  </p>
                   <div className="flex items-center gap-2 text-xs text-gray-500">
-                    <span>{track.duration}s</span>
-                    <span>•</span>
+                    {track.style && (
+                      <>
+                        <span className="text-purple-400">{track.style}</span>
+                        <span>•</span>
+                      </>
+                    )}
+                    {track.instrumental && (
+                      <>
+                        <span>Instrumental</span>
+                        <span>•</span>
+                      </>
+                    )}
                     <span>{formatDate(track.generatedAt)}</span>
                   </div>
                 </div>

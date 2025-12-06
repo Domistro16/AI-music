@@ -6,7 +6,9 @@ const SUNO_API_BASE = 'https://api.sunoapi.org';
 
 interface GenerateRequest {
   prompt: string;
-  duration: number;
+  instrumental?: boolean;
+  style?: string;
+  title?: string;
   walletAddress?: string;
 }
 
@@ -56,8 +58,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+interface SunoOptions {
+  prompt: string;
+  instrumental?: boolean;
+  style?: string;
+  title?: string;
+}
+
 // Generate music using Suno API
-async function generateMusicWithSuno(prompt: string): Promise<string> {
+async function generateMusicWithSuno(options: SunoOptions): Promise<string> {
   const apiKey = process.env.SUNO_API_KEY;
 
   if (!apiKey) {
@@ -67,18 +76,38 @@ async function generateMusicWithSuno(prompt: string): Promise<string> {
   // Step 1: Start generation
   console.log('[Suno] Starting music generation...');
 
+  // Build request body based on whether we have style/title (custom mode) or just prompt
+  const hasCustomOptions = options.style || options.title;
+
+  const requestBody: Record<string, unknown> = {
+    prompt: options.prompt,
+    instrumental: options.instrumental ?? false,
+    model: 'V4',
+  };
+
+  if (hasCustomOptions) {
+    // Use custom mode when style or title is provided
+    requestBody.customMode = true;
+    if (options.style) {
+      requestBody.style = options.style;
+    }
+    if (options.title) {
+      requestBody.title = options.title;
+    }
+  } else {
+    // Auto mode - let Suno decide style
+    requestBody.customMode = false;
+  }
+
+  console.log('[Suno] Request body:', JSON.stringify(requestBody, null, 2));
+
   const generateResponse = await fetch(`${SUNO_API_BASE}/api/v1/generate`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      prompt: prompt,
-      customMode: false,
-      instrumental: false,
-      model: 'V4_5',
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!generateResponse.ok) {
@@ -152,7 +181,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: GenerateRequest = await request.json();
-    const { prompt, duration, walletAddress } = body;
+    const { prompt, instrumental, style, title, walletAddress } = body;
 
     // Validate input
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
@@ -161,9 +190,6 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
-
-    // Duration is informational for Suno (it generates full songs ~2-3 min)
-    // We'll accept the parameter but Suno controls actual length
 
     // Get client IP
     const clientIP = getClientIP(request);
@@ -200,8 +226,14 @@ export async function POST(request: NextRequest) {
 
     // Generate music using Suno
     console.log('[Suno] Starting music generation with prompt:', prompt.substring(0, 50) + '...');
+    console.log('[Suno] Options:', { instrumental, style, title });
 
-    const audioUrl = await generateMusicWithSuno(prompt.trim());
+    const audioUrl = await generateMusicWithSuno({
+      prompt: prompt.trim(),
+      instrumental,
+      style,
+      title,
+    });
 
     console.log('[Suno] Generation complete, audio URL:', audioUrl.substring(0, 50) + '...');
 
@@ -212,7 +244,10 @@ export async function POST(request: NextRequest) {
       success: true,
       audioUrl,
       prompt,
-      duration,
+      instrumental,
+      style,
+      title,
+      duration: 0, // Actual duration will be determined by audio player
       generatedAt: new Date().toISOString(),
       trialStatus: updatedTrialStatus,
     });

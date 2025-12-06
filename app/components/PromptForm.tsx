@@ -1,23 +1,37 @@
 'use client';
 
 import { FC, useState } from 'react';
-import { Wand2, Shuffle, Loader2, Music } from 'lucide-react';
-import { EXAMPLE_PROMPTS, DURATION_OPTIONS, generateRandomPrompt } from '@/app/lib/constants';
+import { Wand2, Shuffle, Loader2, Music, Mic, MicOff } from 'lucide-react';
+import { EXAMPLE_PROMPTS, STYLE_OPTIONS, generateRandomPrompt } from '@/app/lib/constants';
+
+export interface GenerationOptions {
+  prompt: string;
+  instrumental: boolean;
+  style: string;
+  title: string;
+}
 
 interface PromptFormProps {
-  onSubmit: (prompt: string, duration: number) => void;
+  onSubmit: (options: GenerationOptions) => void;
   isLoading: boolean;
   disabled: boolean;
 }
 
 export const PromptForm: FC<PromptFormProps> = ({ onSubmit, isLoading, disabled }) => {
   const [prompt, setPrompt] = useState('');
-  const [duration, setDuration] = useState(10);
+  const [instrumental, setInstrumental] = useState(false);
+  const [style, setStyle] = useState('');
+  const [title, setTitle] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (prompt.trim() && !isLoading && !disabled) {
-      onSubmit(prompt.trim(), duration);
+      onSubmit({
+        prompt: prompt.trim(),
+        instrumental,
+        style,
+        title: title.trim(),
+      });
     }
   };
 
@@ -87,27 +101,79 @@ export const PromptForm: FC<PromptFormProps> = ({ onSubmit, isLoading, disabled 
         </div>
       </div>
 
-      {/* Duration Selector */}
+      {/* Style and Options Row */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {/* Style Selector */}
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-gray-300">
+            Style / Genre
+          </label>
+          <select
+            value={style}
+            onChange={(e) => setStyle(e.target.value)}
+            className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl
+                      text-white appearance-none cursor-pointer
+                      focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent
+                      transition-all duration-300"
+            disabled={isLoading || disabled}
+          >
+            {STYLE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value} className="bg-gray-900">
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Title Input */}
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-gray-300">
+            Title <span className="text-gray-500">(optional)</span>
+          </label>
+          <input
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="My awesome track"
+            className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl
+                      text-white placeholder-gray-500
+                      focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent
+                      transition-all duration-300"
+            disabled={isLoading || disabled}
+          />
+        </div>
+      </div>
+
+      {/* Instrumental Toggle */}
       <div className="space-y-2">
         <label className="block text-sm font-medium text-gray-300">
-          Duration
+          Track Type
         </label>
-        <div className="flex gap-2">
-          {DURATION_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              onClick={() => setDuration(option.value)}
-              className={`flex-1 py-3 px-4 rounded-xl font-medium transition-all duration-200
-                        ${duration === option.value
-                          ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-lg shadow-purple-500/30'
-                          : 'bg-white/5 border border-white/10 text-gray-300 hover:bg-white/10'
-                        }`}
-            >
-              <span className="block text-lg">{option.label}</span>
-              <span className="block text-xs opacity-70">{option.description}</span>
-            </button>
-          ))}
+        <div className="flex gap-3">
+          <button
+            type="button"
+            onClick={() => setInstrumental(false)}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium transition-all duration-200
+                      ${!instrumental
+                        ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-lg shadow-purple-500/30'
+                        : 'bg-white/5 border border-white/10 text-gray-300 hover:bg-white/10'
+                      }`}
+          >
+            <Mic className="w-5 h-5" />
+            <span>With Vocals</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setInstrumental(true)}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium transition-all duration-200
+                      ${instrumental
+                        ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-lg shadow-purple-500/30'
+                        : 'bg-white/5 border border-white/10 text-gray-300 hover:bg-white/10'
+                      }`}
+          >
+            <MicOff className="w-5 h-5" />
+            <span>Instrumental</span>
+          </button>
         </div>
       </div>
 
