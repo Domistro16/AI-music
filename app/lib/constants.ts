@@ -70,6 +70,40 @@ export const DURATION_OPTIONS = [
   { value: 30, label: '30s', description: 'Full preview' },
 ];
 
+// Style/Genre options for Suno API
+export const STYLE_OPTIONS = [
+  { value: '', label: 'Auto (Let AI decide)' },
+  { value: 'Pop', label: 'Pop' },
+  { value: 'Rock', label: 'Rock' },
+  { value: 'Hip Hop', label: 'Hip Hop' },
+  { value: 'R&B', label: 'R&B' },
+  { value: 'Electronic', label: 'Electronic' },
+  { value: 'EDM', label: 'EDM' },
+  { value: 'House', label: 'House' },
+  { value: 'Techno', label: 'Techno' },
+  { value: 'Lo-Fi', label: 'Lo-Fi' },
+  { value: 'Jazz', label: 'Jazz' },
+  { value: 'Classical', label: 'Classical' },
+  { value: 'Orchestral', label: 'Orchestral' },
+  { value: 'Cinematic', label: 'Cinematic' },
+  { value: 'Ambient', label: 'Ambient' },
+  { value: 'Folk', label: 'Folk' },
+  { value: 'Country', label: 'Country' },
+  { value: 'Blues', label: 'Blues' },
+  { value: 'Reggae', label: 'Reggae' },
+  { value: 'Funk', label: 'Funk' },
+  { value: 'Soul', label: 'Soul' },
+  { value: 'Metal', label: 'Metal' },
+  { value: 'Punk', label: 'Punk' },
+  { value: 'Indie', label: 'Indie' },
+  { value: 'Synthwave', label: 'Synthwave' },
+  { value: 'Trap', label: 'Trap' },
+  { value: 'Drill', label: 'Drill' },
+  { value: 'Afrobeat', label: 'Afrobeat' },
+  { value: 'Latin', label: 'Latin' },
+  { value: 'K-Pop', label: 'K-Pop' },
+];
+
 // Access states
 export enum AccessState {
   TRIALS_AVAILABLE = 'TRIALS_AVAILABLE',

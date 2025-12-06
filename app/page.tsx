@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { Header } from './components/Header';
-import { PromptForm } from './components/PromptForm';
+import { PromptForm, GenerationOptions } from './components/PromptForm';
 import { MusicPlayer } from './components/MusicPlayer';
 import { TrackHistory, Track } from './components/TrackHistory';
 import { AccessGate } from './components/AccessGate';
@@ -31,6 +31,9 @@ interface GeneratedTrack {
   prompt: string;
   duration: number;
   generatedAt: string;
+  title?: string;
+  style?: string;
+  instrumental?: boolean;
 }
 
 const HISTORY_STORAGE_KEY = 'lv-music-history';
@@ -129,7 +132,7 @@ export default function Home() {
                        accessState === AccessState.ACCESS_GRANTED;
 
   // Generate music
-  const handleGenerate = async (prompt: string, duration: number) => {
+  const handleGenerate = async (options: GenerationOptions) => {
     setIsLoading(true);
     setError(null);
 
@@ -138,8 +141,10 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt,
-          duration,
+          prompt: options.prompt,
+          instrumental: options.instrumental,
+          style: options.style,
+          title: options.title,
           walletAddress: connected ? publicKey?.toBase58() : undefined,
         }),
       });
@@ -160,6 +165,9 @@ export default function Home() {
         prompt: data.prompt,
         duration: data.duration,
         generatedAt: data.generatedAt,
+        title: data.title,
+        style: data.style,
+        instrumental: data.instrumental,
       };
       setCurrentTrack(newTrack);
 
@@ -189,6 +197,9 @@ export default function Home() {
       prompt: track.prompt,
       duration: track.duration,
       generatedAt: track.generatedAt,
+      title: track.title,
+      style: track.style,
+      instrumental: track.instrumental,
     });
   };
 
@@ -233,7 +244,7 @@ export default function Home() {
             </h1>
             <p className="text-gray-400 text-lg max-w-2xl mx-auto">
               Describe the music you want to hear and let AI bring it to life.
-              Powered by MusicGen, gated by $LV tokens.
+              Powered by Suno AI, gated by $LV tokens.
             </p>
 
             {/* Feature badges */}
@@ -341,7 +352,7 @@ export default function Home() {
       <footer className="py-6 px-4 border-t border-white/5">
         <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <p className="text-sm text-gray-500">
-            Powered by Replicate MusicGen • Gated by $LV Token
+            Powered by Suno AI • Gated by $LV Token
           </p>
           <div className="flex items-center gap-4 text-sm text-gray-500">
             <a href="#" className="hover:text-white transition-colors">
