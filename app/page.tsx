@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import { Header } from './components/Header';
 import { PromptForm, GenerationOptions } from './components/PromptForm';
@@ -36,7 +36,23 @@ interface GeneratedTrack {
   instrumental?: boolean;
 }
 
+interface TaskStatus {
+  taskId: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  audioUrl?: string;
+  imageUrl?: string;
+  duration?: number;
+  error?: string;
+  prompt: string;
+  title?: string;
+  style?: string;
+  instrumental?: boolean;
+  createdAt: string;
+}
+
 const HISTORY_STORAGE_KEY = 'lv-music-history';
+const POLL_INTERVAL = 3000; // 3 seconds
+const MAX_POLL_TIME = 5 * 60 * 1000; // 5 minutes
 
 export default function Home() {
   const { publicKey, connected } = useWallet();
@@ -46,9 +62,23 @@ export default function Home() {
   const [walletVerification, setWalletVerification] = useState<WalletVerification | null>(null);
   const [accessState, setAccessState] = useState<AccessState>(AccessState.TRIALS_AVAILABLE);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('');
   const [currentTrack, setCurrentTrack] = useState<GeneratedTrack | null>(null);
   const [trackHistory, setTrackHistory] = useState<Track[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  // Refs for polling
+  const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const pollStartTimeRef = useRef<number>(0);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Load history from localStorage
   useEffect(() => {
@@ -131,10 +161,77 @@ export default function Home() {
   const canGenerate = accessState === AccessState.TRIALS_AVAILABLE ||
                        accessState === AccessState.ACCESS_GRANTED;
 
+  // Poll for task status
+  const pollTaskStatus = useCallback(async (taskId: string, options: GenerationOptions): Promise<void> => {
+    const elapsed = Date.now() - pollStartTimeRef.current;
+
+    if (elapsed > MAX_POLL_TIME) {
+      setError('Generation timed out. Please try again.');
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/task/${taskId}`);
+      const task: TaskStatus = await response.json();
+
+      if (task.status === 'completed' && task.audioUrl) {
+        // Success! Create the track
+        const newTrack: GeneratedTrack = {
+          audioUrl: task.audioUrl,
+          prompt: task.prompt,
+          duration: task.duration || 0,
+          generatedAt: task.createdAt,
+          title: task.title,
+          style: task.style,
+          instrumental: task.instrumental,
+        };
+        setCurrentTrack(newTrack);
+
+        // Add to history
+        const historyTrack: Track = {
+          id: taskId,
+          ...newTrack,
+        };
+        setTrackHistory(prev => {
+          const updated = [historyTrack, ...prev].slice(0, 20);
+          localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
+          return updated;
+        });
+
+        setIsLoading(false);
+        setLoadingMessage('');
+      } else if (task.status === 'failed') {
+        setError(task.error || 'Generation failed. Please try again.');
+        setIsLoading(false);
+        setLoadingMessage('');
+      } else {
+        // Still processing, update message and poll again
+        const seconds = Math.floor(elapsed / 1000);
+        if (task.status === 'processing') {
+          setLoadingMessage(`Creating your music... (${seconds}s)`);
+        } else {
+          setLoadingMessage(`Starting generation... (${seconds}s)`);
+        }
+
+        pollTimeoutRef.current = setTimeout(() => {
+          pollTaskStatus(taskId, options);
+        }, POLL_INTERVAL);
+      }
+    } catch (err) {
+      console.error('Poll error:', err);
+      // Retry on network errors
+      pollTimeoutRef.current = setTimeout(() => {
+        pollTaskStatus(taskId, options);
+      }, POLL_INTERVAL);
+    }
+  }, []);
+
   // Generate music
   const handleGenerate = async (options: GenerationOptions) => {
     setIsLoading(true);
     setError(null);
+    setLoadingMessage('Starting generation...');
 
     try {
       const response = await fetch('/api/generate', {
@@ -159,34 +256,25 @@ export default function Home() {
         throw new Error(data.error || 'Failed to generate music');
       }
 
-      // Set current track
-      const newTrack: GeneratedTrack = {
-        audioUrl: data.audioUrl,
-        prompt: data.prompt,
-        duration: data.duration,
-        generatedAt: data.generatedAt,
-        title: data.title,
-        style: data.style,
-        instrumental: data.instrumental,
-      };
-      setCurrentTrack(newTrack);
-
-      // Add to history
-      const historyTrack: Track = {
-        id: `track-${Date.now()}`,
-        ...newTrack,
-      };
-      const updatedHistory = [historyTrack, ...trackHistory].slice(0, 20); // Keep last 20
-      saveHistory(updatedHistory);
-
       // Update trial status if applicable
       if (data.trialStatus) {
         setTrialStatus(data.trialStatus);
       }
+
+      // Start polling for task completion
+      const taskId = data.taskId;
+      pollStartTimeRef.current = Date.now();
+      setLoadingMessage('Generation started...');
+
+      // Start polling
+      pollTimeoutRef.current = setTimeout(() => {
+        pollTaskStatus(taskId, options);
+      }, POLL_INTERVAL);
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
       setIsLoading(false);
+      setLoadingMessage('');
     }
   };
 
@@ -311,7 +399,7 @@ export default function Home() {
               )}
 
               {/* Loading state */}
-              {isLoading && <LoadingAnimation />}
+              {isLoading && <LoadingAnimation message={loadingMessage} />}
 
               {/* Error message */}
               {error && (
