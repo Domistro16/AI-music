@@ -2,6 +2,9 @@ import Redis from 'ioredis';
 
 const FREE_TRIAL_LIMIT = 2;
 const KEY_PREFIX = 'music_gen:ip:';
+const TASK_PREFIX = 'music_gen:task:';
+const TRACK_PREFIX = 'music_gen:track:';
+const TRACKS_LIST_KEY = 'music_gen:tracks_list';
 
 // Lazy initialization for serverless environments
 let redis: Redis | null = null;
@@ -46,6 +49,12 @@ function getRedisClient(): Redis | null {
   } catch (error) {
     console.error('[Redis] Failed to create client:', error);
     return null;
+  }
+}
+
+async function ensureConnection(client: Redis): Promise<void> {
+  if (client.status !== 'ready') {
+    await client.connect();
   }
 }
 
@@ -154,13 +163,205 @@ export async function resetTrials(ip: string): Promise<void> {
   if (!client) return;
 
   try {
-    if (client.status !== 'ready') {
-      await client.connect();
-    }
+    await ensureConnection(client);
     const key = `${KEY_PREFIX}${ip}`;
     await client.del(key);
   } catch (error) {
     console.error('[Redis] Error resetting trials:', error);
+  }
+}
+
+// ============================================
+// Task Management (for async Suno generation)
+// ============================================
+
+export type TaskStatus = 'pending' | 'processing' | 'completed' | 'failed';
+
+export interface GenerationTask {
+  id: string;
+  status: TaskStatus;
+  prompt: string;
+  instrumental?: boolean;
+  style?: string;
+  title?: string;
+  sunoTaskId?: string;
+  audioUrl?: string;
+  imageUrl?: string;
+  duration?: number;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Create a new generation task
+ */
+export async function createTask(task: Omit<GenerationTask, 'updatedAt'>): Promise<GenerationTask> {
+  const client = getRedisClient();
+  const fullTask: GenerationTask = {
+    ...task,
+    updatedAt: new Date().toISOString(),
+  };
+
+  if (client) {
+    try {
+      await ensureConnection(client);
+      const key = `${TASK_PREFIX}${task.id}`;
+      await client.setex(key, 60 * 60, JSON.stringify(fullTask)); // 1 hour TTL
+    } catch (error) {
+      console.error('[Redis] Error creating task:', error);
+    }
+  }
+
+  return fullTask;
+}
+
+/**
+ * Get a task by ID
+ */
+export async function getTask(taskId: string): Promise<GenerationTask | null> {
+  const client = getRedisClient();
+  if (!client) return null;
+
+  try {
+    await ensureConnection(client);
+    const key = `${TASK_PREFIX}${taskId}`;
+    const data = await client.get(key);
+    return data ? JSON.parse(data) : null;
+  } catch (error) {
+    console.error('[Redis] Error getting task:', error);
+    return null;
+  }
+}
+
+/**
+ * Update a task
+ */
+export async function updateTask(taskId: string, updates: Partial<GenerationTask>): Promise<GenerationTask | null> {
+  const client = getRedisClient();
+  if (!client) return null;
+
+  try {
+    await ensureConnection(client);
+    const key = `${TASK_PREFIX}${taskId}`;
+    const existing = await client.get(key);
+
+    if (!existing) return null;
+
+    const task = JSON.parse(existing) as GenerationTask;
+    const updatedTask: GenerationTask = {
+      ...task,
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await client.setex(key, 60 * 60, JSON.stringify(updatedTask)); // Reset TTL
+    return updatedTask;
+  } catch (error) {
+    console.error('[Redis] Error updating task:', error);
+    return null;
+  }
+}
+
+// ============================================
+// Track Storage (public music library)
+// ============================================
+
+export interface StoredTrack {
+  id: string;
+  audioUrl: string;
+  imageUrl?: string;
+  prompt: string;
+  title?: string;
+  style?: string;
+  instrumental?: boolean;
+  duration?: number;
+  createdAt: string;
+}
+
+/**
+ * Save a completed track to the public library
+ */
+export async function saveTrack(track: StoredTrack): Promise<void> {
+  const client = getRedisClient();
+  if (!client) return;
+
+  try {
+    await ensureConnection(client);
+    const key = `${TRACK_PREFIX}${track.id}`;
+
+    // Store the track data
+    await client.set(key, JSON.stringify(track));
+
+    // Add to the sorted set (sorted by timestamp for ordering)
+    const timestamp = new Date(track.createdAt).getTime();
+    await client.zadd(TRACKS_LIST_KEY, timestamp, track.id);
+
+    console.log('[Redis] Track saved:', track.id);
+  } catch (error) {
+    console.error('[Redis] Error saving track:', error);
+  }
+}
+
+/**
+ * Get a single track by ID
+ */
+export async function getTrack(trackId: string): Promise<StoredTrack | null> {
+  const client = getRedisClient();
+  if (!client) return null;
+
+  try {
+    await ensureConnection(client);
+    const key = `${TRACK_PREFIX}${trackId}`;
+    const data = await client.get(key);
+    return data ? JSON.parse(data) : null;
+  } catch (error) {
+    console.error('[Redis] Error getting track:', error);
+    return null;
+  }
+}
+
+/**
+ * Get all tracks (most recent first)
+ */
+export async function getTracks(limit = 50, offset = 0): Promise<StoredTrack[]> {
+  const client = getRedisClient();
+  if (!client) return [];
+
+  try {
+    await ensureConnection(client);
+
+    // Get track IDs from sorted set (newest first)
+    const trackIds = await client.zrevrange(TRACKS_LIST_KEY, offset, offset + limit - 1);
+
+    if (trackIds.length === 0) return [];
+
+    // Get all track data
+    const keys = trackIds.map(id => `${TRACK_PREFIX}${id}`);
+    const trackData = await client.mget(...keys);
+
+    return trackData
+      .filter((data): data is string => data !== null)
+      .map(data => JSON.parse(data) as StoredTrack);
+  } catch (error) {
+    console.error('[Redis] Error getting tracks:', error);
+    return [];
+  }
+}
+
+/**
+ * Get total track count
+ */
+export async function getTrackCount(): Promise<number> {
+  const client = getRedisClient();
+  if (!client) return 0;
+
+  try {
+    await ensureConnection(client);
+    return await client.zcard(TRACKS_LIST_KEY);
+  } catch (error) {
+    console.error('[Redis] Error getting track count:', error);
+    return 0;
   }
 }
 
